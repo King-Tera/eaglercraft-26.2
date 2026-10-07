@@ -1,0 +1,638 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Realm Escape - 10 Level Platformer</title>
+    <style>
+        body {
+            margin: 0;
+            background: #0f0f1b;
+            color: #fff;
+            font-family: system-ui, sans-serif;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            min-height: 100vh;
+        }
+        #game-container {
+            position: relative;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.8);
+            border-radius: 8px;
+            overflow: hidden;
+        }
+        canvas {
+            background: linear-gradient(to bottom, #1a1c2e, #0f0f1b);
+            display: block;
+        }
+        #ui {
+            position: absolute;
+            top: 15px;
+            left: 15px;
+            right: 15px;
+            display: flex;
+            justify-content: space-between;
+            font-size: 18px;
+            font-weight: bold;
+            pointer-events: none;
+            text-shadow: 0 2px 4px rgba(0,0,0,0.8);
+        }
+        #boss-hp-bar {
+            position: absolute;
+            bottom: 20px;
+            left: 50%;
+            transform: translateX(-50%);
+            width: 300px;
+            height: 16px;
+            background: #333;
+            border: 2px solid #fff;
+            border-radius: 8px;
+            display: none;
+            overflow: hidden;
+        }
+        #boss-hp-fill {
+            width: 100%;
+            height: 100%;
+            background: linear-gradient(to right, #ff0055, #ffcc00);
+            transition: width 0.1s;
+        }
+    </style>
+</head>
+<body>
+
+<div id="game-container">
+    <div id="ui">
+        <div id="level-display">Level: 1 / 10</div>
+        <div id="lives-display">Lives: ❤️❤️❤️</div>
+        <div id="status-display">WASD / Arrows to Move & Jump</div>
+    </div>
+    <div id="boss-hp-bar"><div id="boss-hp-fill"></div></div>
+    <canvas id="canvas" width="800" height="450"></canvas>
+</div>
+
+<script>
+const canvas = document.getElementById('canvas');
+const ctx = canvas.getContext('2d');
+const levelDisplay = document.getElementById('level-display');
+const livesDisplay = document.getElementById('lives-display');
+const statusDisplay = document.getElementById('status-display');
+const bossHpBar = document.getElementById('boss-hp-bar');
+const bossHpFill = document.getElementById('boss-hp-fill');
+
+const KEYS = {};
+window.addEventListener('keydown', e => {
+    KEYS[e.code] = true;
+    if ((gameOver || gameWon) && e.code === 'KeyR') {
+        restartGame();
+    }
+});
+window.addEventListener('keyup', e => KEYS[e.code] = false);
+
+// Game State
+let currentLevel = 1;
+const MAX_LEVELS = 10;
+let lives = 3;
+let gameOver = false;
+let gameWon = false;
+let invulnerableTimer = 0;
+
+// Physics
+const GRAVITY = 0.45;
+const FRICTION = 0.82;
+
+// Entities Lists
+let platforms = [];
+let spikes = [];
+let enemies = [];
+
+// Player Setup
+const player = {
+    x: 50,
+    y: 300,
+    w: 28,
+    h: 36,
+    vx: 0,
+    vy: 0,
+    speed: 4.8,
+    jumpPower: -11.5,
+    grounded: false,
+    facing: 'right',
+    animFrame: 0
+};
+
+// Boss Setup
+const boss = {
+    x: 600,
+    y: 150,
+    w: 80,
+    h: 90,
+    hp: 10,
+    maxHp: 10,
+    active: false,
+    phaseTimer: 0,
+    vx: 2,
+    vy: 1.5,
+    projectiles: []
+};
+
+function updateUI() {
+    levelDisplay.textContent = `Level: ${currentLevel} / ${MAX_LEVELS}`;
+    livesDisplay.textContent = `Lives: ${'❤️'.repeat(Math.max(0, lives))}`;
+}
+
+function loadLevel(level) {
+    platforms = [{ x: 0, y: 420, w: 800, h: 30 }]; // Floor
+    spikes = [];
+    enemies = [];
+
+    if (level === 10) {
+        // Boss Level Platforms
+        platforms.push({ x: 120, y: 310, w: 160, h: 16 });
+        platforms.push({ x: 520, y: 310, w: 160, h: 16 });
+        platforms.push({ x: 320, y: 210, w: 160, h: 16 });
+        return;
+    }
+
+    // Procedural Generation for Levels 1-9
+    let seed = level * 12345;
+    function pseudoRandom() {
+        seed = (seed * 9301 + 49297) % 233280;
+        return seed / 233280;
+    }
+
+    let currentX = 120;
+    for (let i = 0; i < 4 + level; i++) {
+        let width = 90 + Math.floor(pseudoRandom() * 50);
+        currentX += 70 + Math.floor(pseudoRandom() * 50);
+        let currentY = 220 + Math.floor(pseudoRandom() * 140);
+
+        if (currentX < 680) {
+            platforms.push({ x: currentX, y: currentY, w: width, h: 16 });
+
+            let roll = pseudoRandom();
+            // Spikes on platforms
+            if (roll < 0.35 && width >= 100) {
+                spikes.push({ x: currentX + 30, y: currentY - 12, w: 30, h: 12 });
+            } 
+            // Enemies on platforms
+            else if (roll > 0.55 && level > 1) {
+                enemies.push({
+                    x: currentX + 10,
+                    y: currentY - 24,
+                    w: 24,
+                    h: 24,
+                    minX: currentX,
+                    maxX: currentX + width - 24,
+                    vx: 1.2 + level * 0.15,
+                    alive: true,
+                    animFrame: 0
+                });
+            }
+        }
+    }
+
+    // Ground hazards in later levels
+    if (level >= 3) spikes.push({ x: 300, y: 408, w: 50, h: 12 });
+    if (level >= 6) spikes.push({ x: 520, y: 408, w: 60, h: 12 });
+
+    // Level Exit Portal Platform
+    platforms.push({ x: 720, y: 140, w: 60, h: 16 });
+}
+
+function resetPlayer() {
+    player.x = 40;
+    player.y = 350;
+    player.vx = 0;
+    player.vy = 0;
+}
+
+function playerTakeDamage() {
+    if (invulnerableTimer > 0) return;
+
+    lives--;
+    invulnerableTimer = 60; // 1 second invulnerability
+    updateUI();
+
+    if (lives <= 0) {
+        gameOver = true;
+    } else {
+        resetPlayer();
+    }
+}
+
+function restartGame() {
+    lives = 3;
+    currentLevel = 1;
+    gameOver = false;
+    gameWon = false;
+    boss.hp = boss.maxHp;
+    boss.projectiles = [];
+    statusDisplay.textContent = "WASD / Arrows to Move & Jump";
+    bossHpBar.style.display = 'none';
+    loadLevel(currentLevel);
+    resetPlayer();
+    updateUI();
+}
+
+// Drawing Functions
+function drawPlayer() {
+    if (invulnerableTimer % 6 > 3) return; // Flash when hit
+
+    ctx.save();
+    ctx.translate(player.x + player.w / 2, player.y + player.h / 2);
+    if (player.facing === 'left') ctx.scale(-1, 1);
+
+    // Cape
+    ctx.fillStyle = '#e63946';
+    ctx.beginPath();
+    ctx.moveTo(-6, -8);
+    ctx.quadraticCurveTo(-16, 4, -10 + Math.sin(player.animFrame) * 4, 16);
+    ctx.lineTo(-2, 10);
+    ctx.fill();
+
+    // Body Armor
+    ctx.fillStyle = '#457b9d';
+    ctx.beginPath();
+    ctx.roundRect(-8, -6, 16, 20, 4);
+    ctx.fill();
+
+    // Helmet
+    ctx.fillStyle = '#f1faee';
+    ctx.beginPath();
+    ctx.arc(0, -12, 9, 0, Math.PI * 2);
+    ctx.fill();
+
+    // Visor
+    ctx.fillStyle = '#1d3557';
+    ctx.beginPath();
+    ctx.roundRect(1, -15, 7, 5, 2);
+    ctx.fill();
+
+    // Boots
+    ctx.fillStyle = '#1d3557';
+    ctx.fillRect(-7, 14, 6, 5);
+    ctx.fillRect(1, 14, 6, 5);
+
+    ctx.restore();
+}
+
+function drawSpikes() {
+    spikes.forEach(s => {
+        ctx.fillStyle = '#e63946';
+        ctx.strokeStyle = '#f1faee';
+        ctx.lineWidth = 1;
+        
+        let count = Math.floor(s.w / 10);
+        let spikeW = s.w / count;
+        
+        ctx.beginPath();
+        for (let i = 0; i < count; i++) {
+            let sx = s.x + i * spikeW;
+            ctx.moveTo(sx, s.y + s.h);
+            ctx.lineTo(sx + spikeW / 2, s.y);
+            ctx.lineTo(sx + spikeW, s.y + s.h);
+        }
+        ctx.fill();
+        ctx.stroke();
+    });
+}
+
+function drawEnemies() {
+    enemies.forEach(e => {
+        if (!e.alive) return;
+        
+        ctx.save();
+        ctx.translate(e.x + e.w / 2, e.y + e.h / 2);
+        
+        // Slime Body
+        let pulse = Math.sin(e.animFrame) * 2;
+        ctx.fillStyle = '#7209b7';
+        ctx.beginPath();
+        ctx.ellipse(0, 2, e.w / 2 + pulse, e.h / 2 - pulse, 0, 0, Math.PI * 2);
+        ctx.fill();
+
+        // Eye
+        ctx.fillStyle = '#ff0055';
+        ctx.beginPath();
+        ctx.arc(e.vx > 0 ? 4 : -4, -2, 5, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.fillStyle = '#fff';
+        ctx.beginPath();
+        ctx.arc(e.vx > 0 ? 5 : -5, -3, 2, 0, Math.PI * 2);
+        ctx.fill();
+
+        ctx.restore();
+    });
+}
+
+function drawBoss() {
+    if (!boss.active) return;
+
+    let isPhase2 = boss.hp <= 5;
+
+    ctx.save();
+    ctx.translate(boss.x + boss.w / 2, boss.y + boss.h / 2);
+
+    // Floating Aura (Red/Rage in Phase 2)
+    let pulse = Math.sin(Date.now() / (isPhase2 ? 100 : 200)) * (isPhase2 ? 8 : 4);
+    ctx.fillStyle = isPhase2 ? 'rgba(255, 0, 85, 0.5)' : 'rgba(157, 78, 221, 0.3)';
+    ctx.beginPath();
+    ctx.arc(0, 0, 48 + pulse, 0, Math.PI * 2);
+    ctx.fill();
+
+    // Body
+    ctx.fillStyle = isPhase2 ? '#4a001f' : '#2b1055';
+    ctx.beginPath();
+    ctx.moveTo(0, -45);
+    ctx.bezierCurveTo(45, -20, 35, 40, 0, 45);
+    ctx.bezierCurveTo(-35, 40, -45, -20, 0, -45);
+    ctx.fill();
+    ctx.strokeStyle = isPhase2 ? '#ff0055' : '#7209b7';
+    ctx.lineWidth = isPhase2 ? 4 : 3;
+    ctx.stroke();
+
+    // Central Eye
+    ctx.fillStyle = isPhase2 ? '#ffbe0b' : '#f72585';
+    ctx.beginPath();
+    ctx.arc(0, -5, isPhase2 ? 15 : 12, 0, Math.PI * 2);
+    ctx.fill();
+
+    ctx.fillStyle = '#fff';
+    ctx.beginPath();
+    ctx.arc(-2, -7, 4, 0, Math.PI * 2);
+    ctx.fill();
+
+    // Horns
+    ctx.fillStyle = isPhase2 ? '#ff5500' : '#4cc9f0';
+    ctx.beginPath();
+    ctx.moveTo(-20, -30);
+    ctx.lineTo(-38, -55);
+    ctx.lineTo(-15, -38);
+    ctx.fill();
+
+    ctx.beginPath();
+    ctx.moveTo(20, -30);
+    ctx.lineTo(38, -55);
+    ctx.lineTo(15, -38);
+    ctx.fill();
+
+    ctx.restore();
+
+    // Projectiles
+    ctx.fillStyle = isPhase2 ? '#ffbe0b' : '#ff0055';
+    boss.projectiles.forEach(p => {
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, p.r, 0, Math.PI * 2);
+        ctx.fill();
+    });
+}
+
+function drawPlatforms() {
+    platforms.forEach((p, idx) => {
+        ctx.fillStyle = idx === 0 ? '#2a9d8f' : '#e76f51';
+        ctx.beginPath();
+        ctx.roundRect(p.x, p.y, p.w, p.h, 4);
+        ctx.fill();
+
+        ctx.fillStyle = idx === 0 ? '#e9c46a' : '#f4a261';
+        ctx.fillRect(p.x, p.y, p.w, 4);
+    });
+
+    if (currentLevel < 10) {
+        ctx.fillStyle = '#4cc9f0';
+        ctx.beginPath();
+        ctx.ellipse(750, 105, 12, 24, 0, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.strokeStyle = '#fff';
+        ctx.lineWidth = 2;
+        ctx.stroke();
+    }
+}
+
+// Logic & Mechanics Updates
+function updateEnemies() {
+    enemies.forEach(e => {
+        if (!e.alive) return;
+
+        e.x += e.vx;
+        if (e.x <= e.minX || e.x >= e.maxX) e.vx *= -1;
+        e.animFrame += 0.1;
+
+        // Collision with player
+        if (player.x < e.x + e.w &&
+            player.x + player.w > e.x &&
+            player.y < e.y + e.h &&
+            player.y + player.h > e.y) {
+            
+            // Stomp mechanic
+            if (player.vy > 0 && player.y + player.h <= e.y + 12) {
+                e.alive = false;
+                player.vy = -8;
+            } else {
+                playerTakeDamage();
+            }
+        }
+    });
+}
+
+function updateSpikes() {
+    spikes.forEach(s => {
+        if (player.x < s.x + s.w &&
+            player.x + player.w > s.x &&
+            player.y < s.y + s.h &&
+            player.y + player.h > s.y) {
+            playerTakeDamage();
+        }
+    });
+}
+
+function updateBoss() {
+    if (currentLevel !== 10) return;
+    boss.active = true;
+    bossHpBar.style.display = 'block';
+
+    let isPhase2 = boss.hp <= 5;
+    let speedMult = isPhase2 ? 1.7 : 1.0;
+
+    // Movement Pattern
+    boss.x += boss.vx * speedMult;
+    boss.y += Math.sin(Date.now() / (isPhase2 ? 250 : 400)) * boss.vy * speedMult;
+
+    if (boss.x <= 100 || boss.x + boss.w >= 700) boss.vx *= -1;
+
+    // Boss Attacks (Phase 1 vs Phase 2)
+    boss.phaseTimer++;
+    let attackInterval = isPhase2 ? 65 : 100;
+
+    if (boss.phaseTimer % attackInterval === 0) {
+        let angle = Math.atan2((player.y - boss.y), (player.x - boss.x));
+        
+        if (isPhase2) {
+            // Phase 2: 3-Way Spread Attack
+            for (let offset of [-0.3, 0, 0.3]) {
+                boss.projectiles.push({
+                    x: boss.x + boss.w / 2,
+                    y: boss.y + boss.h / 2,
+                    vx: Math.cos(angle + offset) * 5,
+                    vy: Math.sin(angle + offset) * 5,
+                    r: 8
+                });
+            }
+        } else {
+            // Phase 1: Single Orb
+            boss.projectiles.push({
+                x: boss.x + boss.w / 2,
+                y: boss.y + boss.h / 2,
+                vx: Math.cos(angle) * 4,
+                vy: Math.sin(angle) * 4,
+                r: 7
+            });
+        }
+    }
+
+    // Projectile Movement & Collision
+    boss.projectiles.forEach((p, i) => {
+        p.x += p.vx;
+        p.y += p.vy;
+
+        if (p.x > player.x && p.x < player.x + player.w &&
+            p.y > player.y && p.y < player.y + player.h) {
+            playerTakeDamage();
+            boss.projectiles.splice(i, 1);
+        }
+    });
+
+    // Stomp Boss Mechanic
+    if (player.vy > 0 &&
+        player.x + player.w > boss.x &&
+        player.x < boss.x + boss.w &&
+        player.y + player.h >= boss.y &&
+        player.y + player.h <= boss.y + 25) {
+        
+        boss.hp--;
+        player.vy = -10;
+        bossHpFill.style.width = `${(boss.hp / boss.maxHp) * 100}%`;
+
+        if (boss.hp <= 0) {
+            boss.active = false;
+            gameWon = true;
+            bossHpBar.style.display = 'none';
+        }
+    }
+}
+
+function update() {
+    if (gameOver || gameWon) return;
+
+    if (invulnerableTimer > 0) invulnerableTimer--;
+
+    // Movement
+    if (KEYS['ArrowRight'] || KEYS['KeyD']) {
+        player.vx = player.speed;
+        player.facing = 'right';
+        player.animFrame += 0.2;
+    } else if (KEYS['ArrowLeft'] || KEYS['KeyA']) {
+        player.vx = -player.speed;
+        player.facing = 'left';
+        player.animFrame += 0.2;
+    } else {
+        player.vx *= FRICTION;
+    }
+
+    if ((KEYS['ArrowUp'] || KEYS['KeyW'] || KEYS['Space']) && player.grounded) {
+        player.vy = player.jumpPower;
+        player.grounded = false;
+    }
+
+    player.vy += GRAVITY;
+    player.x += player.vx;
+    player.y += player.vy;
+
+    // Platform Collisions
+    player.grounded = false;
+    platforms.forEach(p => {
+        if (player.x < p.x + p.w &&
+            player.x + player.w > p.x &&
+            player.y + player.h >= p.y &&
+            player.y + player.h <= p.y + p.h + player.vy) {
+            
+            if (player.vy > 0) {
+                player.grounded = true;
+                player.vy = 0;
+                player.y = p.y - player.h;
+            }
+        }
+    });
+
+    // Out of bounds reset
+    if (player.y > canvas.height) {
+        playerTakeDamage();
+    }
+
+    // Goal Portal Progression
+    if (currentLevel < 10 && player.x > 730 && player.y < 160) {
+        currentLevel++;
+        loadLevel(currentLevel);
+        resetPlayer();
+        updateUI();
+        if (currentLevel === 10) {
+            statusDisplay.textContent = "BOSS BATTLE! Phase 1 & Phase 2 - Stomp to damage!";
+        }
+    }
+
+    updateSpikes();
+    updateEnemies();
+    updateBoss();
+}
+
+function render() {
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+    drawPlatforms();
+    drawSpikes();
+    drawEnemies();
+    drawBoss();
+    drawPlayer();
+
+    // Game Over Overlay
+    if (gameOver) {
+        ctx.fillStyle = 'rgba(0,0,0,0.85)';
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+        ctx.fillStyle = '#ff0055';
+        ctx.font = '36px sans-serif';
+        ctx.textAlign = 'center';
+        ctx.fillText('GAME OVER', canvas.width / 2, canvas.height / 2 - 10);
+        ctx.fillStyle = '#fff';
+        ctx.font = '20px sans-serif';
+        ctx.fillText('Press "R" to Restart', canvas.width / 2, canvas.height / 2 + 30);
+    }
+
+    // Victory Overlay
+    if (gameWon) {
+        ctx.fillStyle = 'rgba(0,0,0,0.85)';
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+        ctx.fillStyle = '#4cc9f0';
+        ctx.font = '36px sans-serif';
+        ctx.textAlign = 'center';
+        ctx.fillText('VICTORY! YOU DEFEATED THE BOSS!', canvas.width / 2, canvas.height / 2 - 10);
+        ctx.fillStyle = '#fff';
+        ctx.font = '20px sans-serif';
+        ctx.fillText('Press "R" to Play Again', canvas.width / 2, canvas.height / 2 + 30);
+    }
+}
+
+function gameLoop() {
+    update();
+    render();
+    requestAnimationFrame(gameLoop);
+}
+
+// Initialization
+loadLevel(currentLevel);
+resetPlayer();
+updateUI();
+gameLoop();
+</script>
+</body>
+</html>
